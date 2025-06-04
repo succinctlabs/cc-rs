@@ -185,6 +185,7 @@ pub(crate) const LLVM_TARGETS: &[(&str, &str)] = &[
     ("riscv32gc-unknown-linux-musl", "riscv32-unknown-linux-musl"),
     ("riscv32i-unknown-none-elf", "riscv32"),
     ("riscv32im-risc0-zkvm-elf", "riscv32"),
+    ("riscv32im-succinct-zkvm-elf", "riscv32"),
     ("riscv32im-unknown-none-elf", "riscv32"),
     ("riscv32ima-unknown-none-elf", "riscv32"),
     ("riscv32imac-esp-espidf", "riscv32"),
