@@ -22,6 +22,18 @@ pub(crate) struct RustcCodegenFlags<'a> {
 }
 
 impl<'this> RustcCodegenFlags<'this> {
+    fn arg_to_bool(arg: impl AsRef<str>) -> Option<bool> {
+        match arg.as_ref() {
+            "y" | "yes" | "on" | "true" => Some(true),
+            "n" | "no" | "off" | "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    fn arg_to_u32(arg: impl AsRef<str>) -> Option<u32> {
+        arg.as_ref().parse().ok()
+    }
+
     // Parse flags obtained from CARGO_ENCODED_RUSTFLAGS
     pub(crate) fn parse(rustflags_env: &'this str) -> Result<Self, Error> {
         fn is_flag_prefix(flag: &str) -> bool {
@@ -44,6 +56,23 @@ impl<'this> RustcCodegenFlags<'this> {
             .contains(&flag)
         }
 
+        /// Normalizes a flag by identifying its canonical prefix and value.
+        ///
+        /// This function is used to support multiple syntaxes for the same underlying rustc flag.
+        /// For example:
+        /// - `--codegen code-model=small` → ("-C", "code-model=small")
+        /// - `--codegen=code-model=small` → ("-C", "code-model=small")
+        /// - `-C code-model=small`        → ("-C", "code-model=small")
+        ///
+        /// It returns a tuple where:
+        /// - The first element is the normalized prefix (`-C`, `-Z`, etc.).
+        /// - The second is the actual flag content to be processed.
+        ///
+        /// This helps unify flag parsing regardless of how the user wrote the original input.
+        ///
+        /// # Arguments
+        /// * `prev` - The previous token (possibly a flag prefix like `--codegen`, `-C`, etc.).
+        /// * `curr` - The current token (either a flag value or a combined prefix=value).
         fn handle_flag_prefix<'a>(prev: &'a str, curr: &'a str) -> (&'a str, &'a str) {
             match prev {
                 "--codegen" | "-C" => ("-C", curr),
@@ -63,6 +92,7 @@ impl<'this> RustcCodegenFlags<'this> {
         let mut codegen_flags = Self::default();
 
         let mut prev_prefix = None;
+        // CARGO_ENCODED_RUSTFLAGS uses ASCII Unit Separator (␟) to separate flags.
         for curr in rustflags_env.split("\u{1f}") {
             let prev = prev_prefix.take().unwrap_or("");
             if prev.is_empty() && is_flag_prefix(curr) {
@@ -78,19 +108,6 @@ impl<'this> RustcCodegenFlags<'this> {
     }
 
     fn set_rustc_flag(&mut self, prefix: &str, flag: &'this str) -> Result<(), Error> {
-        // Convert a textual representation of a bool-like rustc flag argument into an actual bool
-        fn arg_to_bool(arg: impl AsRef<str>) -> Option<bool> {
-            match arg.as_ref() {
-                "y" | "yes" | "on" | "true" => Some(true),
-                "n" | "no" | "off" | "false" => Some(false),
-                _ => None,
-            }
-        }
-
-        fn arg_to_u32(arg: impl AsRef<str>) -> Option<u32> {
-            arg.as_ref().parse().ok()
-        }
-
         let (flag, value) = if let Some((flag, value)) = flag.split_once('=') {
             (flag, Some(value))
         } else {
@@ -137,16 +154,16 @@ impl<'this> RustcCodegenFlags<'this> {
                     Some(flag_ok_or(value, "-Crelocation-model must have a value")?);
             }
             // https://doc.rust-lang.org/rustc/codegen-options/index.html#embed-bitcode
-            "-Cembed-bitcode" => self.embed_bitcode = value.map_or(Some(true), arg_to_bool),
+            "-Cembed-bitcode" => self.embed_bitcode = value.map_or(Some(true), Self::arg_to_bool),
             // https://doc.rust-lang.org/rustc/codegen-options/index.html#force-frame-pointers
             "-Cforce-frame-pointers" => {
-                self.force_frame_pointers = value.map_or(Some(true), arg_to_bool)
+                self.force_frame_pointers = value.map_or(Some(true), Self::arg_to_bool);
             }
             // https://doc.rust-lang.org/rustc/codegen-options/index.html#no-redzone
-            "-Cno-redzone" => self.no_redzone = value.map_or(Some(true), arg_to_bool),
+            "-Cno-redzone" => self.no_redzone = value.map_or(Some(true), Self::arg_to_bool),
             // https://doc.rust-lang.org/rustc/codegen-options/index.html#soft-float
             // Note: This flag is now deprecated in rustc.
-            "-Csoft-float" => self.soft_float = value.map_or(Some(true), arg_to_bool),
+            "-Csoft-float" => self.soft_float = value.map_or(Some(true), Self::arg_to_bool),
             // https://doc.rust-lang.org/beta/unstable-book/compiler-flags/branch-protection.html
             // FIXME: Drop the -Z variant and update the doc link once the option is stabilised
             "-Zbranch-protection" | "-Cbranch-protection" => {
@@ -156,7 +173,7 @@ impl<'this> RustcCodegenFlags<'this> {
             // https://doc.rust-lang.org/beta/unstable-book/compiler-flags/dwarf-version.html
             // FIXME: Drop the -Z variant and update the doc link once the option is stablized
             "-Zdwarf-version" | "-Cdwarf-version" => {
-                self.dwarf_version = Some(value.and_then(arg_to_u32).ok_or(Error::new(
+                self.dwarf_version = Some(value.and_then(Self::arg_to_u32).ok_or(Error::new(
                     ErrorKind::InvalidFlag,
                     "-Zdwarf-version must have a value",
                 ))?);
@@ -347,7 +364,7 @@ mod tests {
     #[track_caller]
     fn check(env: &str, expected: &RustcCodegenFlags) {
         let actual = RustcCodegenFlags::parse(env).unwrap();
-        assert_eq!(actual, *expected);
+        assert_eq!(actual, *expected, "Mismatch for input: {:?}", env);
     }
 
     #[test]
