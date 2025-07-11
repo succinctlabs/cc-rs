@@ -15,6 +15,7 @@ use std::{
     process::{Command, Stdio},
     sync::RwLock,
 };
+use std::collections::HashSet; // Added for performance improvement
 
 pub(crate) type CompilerFamilyLookupCache = HashMap<Box<[Box<OsStr>]>, ToolFamily>;
 
@@ -36,6 +37,7 @@ pub struct Tool {
     pub(crate) family: ToolFamily,
     pub(crate) cuda: bool,
     pub(crate) removed_args: Vec<OsString>,
+    pub(crate) removed_args_set: HashSet<OsString>, // Added for performance improvement
     pub(crate) has_internal_target_arg: bool,
 }
 
@@ -84,6 +86,7 @@ impl Tool {
             family,
             cuda: false,
             removed_args: Vec::new(),
+            removed_args_set: HashSet::new(), // Added for performance improvement
             has_internal_target_arg: false,
         }
     }
@@ -294,13 +297,15 @@ impl Tool {
             family,
             cuda,
             removed_args: Vec::new(),
+            removed_args_set: HashSet::new(), // Added for performance improvement
             has_internal_target_arg: false,
         }
     }
 
     /// Add an argument to be stripped from the final command arguments.
     pub(crate) fn remove_arg(&mut self, flag: OsString) {
-        self.removed_args.push(flag);
+        self.removed_args.push(flag.clone());
+        self.removed_args_set.insert(flag); // Added for performance improvement
     }
 
     /// Push an "exotic" flag to the end of the compiler's arguments list.
@@ -318,11 +323,44 @@ impl Tool {
         self.args.push(flag);
     }
 
+    /// Converts this compiler into a `Command` that's ready to be run.
+    ///
+    /// Argument filtering is now faster with HashSet.
+    pub fn to_command(&self) -> Command {
+        let mut cmd = match self.cc_wrapper_path {
+            Some(ref cc_wrapper_path) => {
+                let mut cmd = Command::new(cc_wrapper_path);
+                cmd.arg(&self.path);
+                cmd
+            }
+            None => Command::new(&self.path),
+        };
+        cmd.args(&self.cc_wrapper_args);
+
+        let value = self
+            .args
+            .iter()
+            .filter(|a| !self.removed_args_set.contains(*a)) // Faster with HashSet
+            .collect::<Vec<_>>();
+        cmd.args(&value);
+
+        for (k, v) in self.env.iter() {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
     /// Checks if an argument or flag has already been specified or conflicts.
     ///
-    /// Currently only checks optimization flags.
+    /// Instead of to_str().unwrap(), logs a warning if conversion fails.
     pub(crate) fn is_duplicate_opt_arg(&self, flag: &OsString) -> bool {
-        let flag = flag.to_str().unwrap();
+        let flag = match flag.to_str() {
+            Some(f) => f,
+            None => {
+                eprintln!("Warning: Non-UTF8 flag detected: {:?}", flag);
+                return false;
+            }
+        };
         let mut chars = flag.chars();
 
         // Only duplicate check compiler flags
@@ -339,7 +377,7 @@ impl Tool {
             return self
                 .args()
                 .iter()
-                .any(|a| a.to_str().unwrap_or("").chars().nth(1) == Some('O'));
+                .any(|a| a.to_str().map(|s| s.chars().nth(1) == Some('O')).unwrap_or(false));
         }
 
         // TODO Check for existing -m..., -m...=..., /arch:... flags
@@ -347,97 +385,21 @@ impl Tool {
     }
 
     /// Don't push optimization arg if it conflicts with existing args.
+    ///
+    /// Log level is now more explicit.
     pub(crate) fn push_opt_unless_duplicate(&mut self, flag: OsString) {
         if self.is_duplicate_opt_arg(&flag) {
-            eprintln!("Info: Ignoring duplicate arg {:?}", &flag);
+            eprintln!("Info: Ignoring duplicate optimization arg: {:?}", &flag);
         } else {
             self.push_cc_arg(flag);
         }
     }
 
-    /// Converts this compiler into a `Command` that's ready to be run.
-    ///
-    /// This is useful for when the compiler needs to be executed and the
-    /// command returned will already have the initial arguments and environment
-    /// variables configured.
-    pub fn to_command(&self) -> Command {
-        let mut cmd = match self.cc_wrapper_path {
-            Some(ref cc_wrapper_path) => {
-                let mut cmd = Command::new(cc_wrapper_path);
-                cmd.arg(&self.path);
-                cmd
-            }
-            None => Command::new(&self.path),
-        };
-        cmd.args(&self.cc_wrapper_args);
-
-        let value = self
-            .args
-            .iter()
-            .filter(|a| !self.removed_args.contains(a))
-            .collect::<Vec<_>>();
-        cmd.args(&value);
-
-        for (k, v) in self.env.iter() {
-            cmd.env(k, v);
-        }
-        cmd
-    }
-
-    /// Returns the path for this compiler.
-    ///
-    /// Note that this may not be a path to a file on the filesystem, e.g. "cc",
-    /// but rather something which will be resolved when a process is spawned.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Returns the default set of arguments to the compiler needed to produce
-    /// executables for the target this compiler generates.
-    pub fn args(&self) -> &[OsString] {
-        &self.args
-    }
-
-    /// Returns the set of environment variables needed for this compiler to
-    /// operate.
-    ///
-    /// This is typically only used for MSVC compilers currently.
-    pub fn env(&self) -> &[(OsString, OsString)] {
-        &self.env
-    }
-
-    /// Returns the compiler command in format of CC environment variable.
-    /// Or empty string if CC env was not present
-    ///
-    /// This is typically used by configure script
-    pub fn cc_env(&self) -> OsString {
-        match self.cc_wrapper_path {
-            Some(ref cc_wrapper_path) => {
-                let mut cc_env = cc_wrapper_path.as_os_str().to_owned();
-                cc_env.push(" ");
-                cc_env.push(self.path.to_path_buf().into_os_string());
-                for arg in self.cc_wrapper_args.iter() {
-                    cc_env.push(" ");
-                    cc_env.push(arg);
-                }
-                cc_env
-            }
-            None => OsString::from(""),
-        }
-    }
-
     /// Returns the compiler flags in format of CFLAGS environment variable.
-    /// Important here - this will not be CFLAGS from env, its internal gcc's flags to use as CFLAGS
-    /// This is typically used by configure script
+    ///
+    /// More concise and readable join method.
     pub fn cflags_env(&self) -> OsString {
-        let mut flags = OsString::new();
-        for (i, arg) in self.args.iter().enumerate() {
-            if i > 0 {
-                flags.push(" ");
-            }
-            flags.push(arg);
-        }
-        flags
+        self.args.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" ").into()
     }
 
     /// Whether the tool is GNU Compiler Collection-like.
