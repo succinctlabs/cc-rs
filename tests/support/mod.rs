@@ -130,40 +130,32 @@ impl Test {
 impl Execution {
     pub fn must_have<P: AsRef<OsStr>>(&self, p: P) -> &Execution {
         if !self.has(p.as_ref()) {
-            panic!("didn't find {:?} in {:?}", p.as_ref(), self.args);
-        } else {
-            self
+            panic!("Argument not found: {:?}\nArgs: {:?}", p.as_ref(), self.args);
         }
+        self
     }
 
     pub fn must_not_have<P: AsRef<OsStr>>(&self, p: P) -> &Execution {
         if self.has(p.as_ref()) {
-            panic!("found {:?}", p.as_ref());
-        } else {
-            self
+            panic!("Unexpected argument found: {:?}\nArgs: {:?}", p.as_ref(), self.args);
         }
+        self
     }
 
     pub fn has(&self, p: &OsStr) -> bool {
-        self.args.iter().any(|arg| OsStr::new(arg) == p)
+        self.args.iter().any(|arg| arg == p)
     }
 
     pub fn must_have_in_order(&self, before: &str, after: &str) -> &Execution {
-        let before_position = self
-            .args
-            .iter()
-            .rposition(|x| OsStr::new(x) == OsStr::new(before));
-        let after_position = self
-            .args
-            .iter()
-            .rposition(|x| OsStr::new(x) == OsStr::new(after));
+        let before_position = self.args.iter().position(|x| x == before);
+        let after_position = self.args.iter().position(|x| x == after);
         match (before_position, after_position) {
             (Some(b), Some(a)) if b < a => {}
             (b, a) => panic!(
-                "{:?} (last position: {:?}) did not appear before {:?} (last position: {:?}): {:?}",
+                "'{}' (position: {:?}) did not appear before '{}' (position: {:?})\nArgs: {:?}",
                 before, b, after, a, self.args
             ),
-        };
+        }
         self
     }
 }
